@@ -129,7 +129,11 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 
     char final_path[512];
     object_path(id_out, final_path, sizeof(final_path));
-    int fd = open(final_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+
+    char tmp_path[576];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", final_path);
+
+    int fd = open(tmp_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd < 0) {
         free(full);
         return -1;
@@ -140,6 +144,7 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
         ssize_t w = write(fd, full + total, full_len - (size_t)total);
         if (w <= 0) {
             close(fd);
+            unlink(tmp_path);
             free(full);
             return -1;
         }
@@ -148,11 +153,29 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 
     if (fsync(fd) != 0) {
         close(fd);
+        unlink(tmp_path);
         free(full);
         return -1;
     }
 
-    close(fd);
+    if (close(fd) != 0) {
+        unlink(tmp_path);
+        free(full);
+        return -1;
+    }
+
+    if (rename(tmp_path, final_path) != 0) {
+        unlink(tmp_path);
+        free(full);
+        return -1;
+    }
+
+    int dfd = open(dir_path, O_RDONLY | O_DIRECTORY);
+    if (dfd >= 0) {
+        fsync(dfd);
+        close(dfd);
+    }
+
     free(full);
     return 0;
 }
