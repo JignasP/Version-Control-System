@@ -16,6 +16,8 @@
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <errno.h>
+#include <inttypes.h>
 
 // Forward declaration (implemented in object.c)
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
@@ -202,9 +204,43 @@ static int write_tree_level(const Index *index, const char *prefix, ObjectID *id
     return rc;
 }
 
+static int load_index_for_tree(Index *index) {
+    index->count = 0;
+
+    FILE *f = fopen(INDEX_FILE, "r");
+    if (!f) {
+        if (errno == ENOENT) return 0;
+        return -1;
+    }
+
+    char line[1024];
+    while (fgets(line, sizeof(line), f)) {
+        if (index->count >= MAX_INDEX_ENTRIES) {
+            fclose(f);
+            return -1;
+        }
+
+        IndexEntry *e = &index->entries[index->count];
+        char hex[HASH_HEX_SIZE + 1] = {0};
+        if (sscanf(line, "%o %64s %" SCNu64 " %u %511[^\n]",
+                   &e->mode, hex, &e->mtime_sec, &e->size, e->path) != 5) {
+            fclose(f);
+            return -1;
+        }
+        if (hex_to_hash(hex, &e->hash) != 0) {
+            fclose(f);
+            return -1;
+        }
+        index->count++;
+    }
+
+    fclose(f);
+    return 0;
+}
+
 int tree_from_index(ObjectID *id_out) {
     Index index;
-    if (index_load(&index) != 0) return -1;
+    if (load_index_for_tree(&index) != 0) return -1;
 
     return write_tree_level(&index, "", id_out);
 }

@@ -193,23 +193,29 @@ int index_load(Index *index) {
 //
 // Returns 0 on success, -1 on error.
 int index_save(const Index *index) {
-    Index sorted = *index;
-    qsort(sorted.entries, sorted.count, sizeof(IndexEntry), compare_index_entries);
+    IndexEntry *sorted_entries = NULL;
+    if (index->count > 0) {
+        sorted_entries = malloc((size_t)index->count * sizeof(IndexEntry));
+        if (!sorted_entries) return -1;
+        memcpy(sorted_entries, index->entries, (size_t)index->count * sizeof(IndexEntry));
+        qsort(sorted_entries, (size_t)index->count, sizeof(IndexEntry), compare_index_entries);
+    }
 
     const char *tmp_path = INDEX_FILE ".tmp";
     FILE *f = fopen(tmp_path, "w");
     if (!f) return -1;
 
-    for (int i = 0; i < sorted.count; i++) {
+    for (int i = 0; i < index->count; i++) {
         char hex[HASH_HEX_SIZE + 1];
-        hash_to_hex(&sorted.entries[i].hash, hex);
+        hash_to_hex(&sorted_entries[i].hash, hex);
 
         if (fprintf(f, "%o %s %" PRIu64 " %u %s\n",
-                    sorted.entries[i].mode,
+                    sorted_entries[i].mode,
                     hex,
-                    sorted.entries[i].mtime_sec,
-                    sorted.entries[i].size,
-                    sorted.entries[i].path) < 0) {
+                    sorted_entries[i].mtime_sec,
+                    sorted_entries[i].size,
+                    sorted_entries[i].path) < 0) {
+            free(sorted_entries);
             fclose(f);
             unlink(tmp_path);
             return -1;
@@ -217,21 +223,25 @@ int index_save(const Index *index) {
     }
 
     if (fflush(f) != 0 || fsync(fileno(f)) != 0) {
+        free(sorted_entries);
         fclose(f);
         unlink(tmp_path);
         return -1;
     }
 
     if (fclose(f) != 0) {
+        free(sorted_entries);
         unlink(tmp_path);
         return -1;
     }
 
     if (rename(tmp_path, INDEX_FILE) != 0) {
+        free(sorted_entries);
         unlink(tmp_path);
         return -1;
     }
 
+    free(sorted_entries);
     return 0;
 }
 
