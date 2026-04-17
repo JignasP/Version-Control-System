@@ -94,9 +94,67 @@ int object_exists(const ObjectID *id) {
 //
 // Returns 0 on success, -1 on error.
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
-    // TODO: Implement
-    (void)type; (void)data; (void)len; (void)id_out;
-    return -1;
+    const char *type_str = NULL;
+    if (type == OBJ_BLOB) type_str = "blob";
+    else if (type == OBJ_TREE) type_str = "tree";
+    else if (type == OBJ_COMMIT) type_str = "commit";
+    else return -1;
+
+    char header[64];
+    int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len) + 1;
+    if (header_len <= 1 || (size_t)header_len > sizeof(header)) return -1;
+
+    size_t full_len = (size_t)header_len + len;
+    uint8_t *full = malloc(full_len);
+    if (!full) return -1;
+
+    memcpy(full, header, (size_t)header_len);
+    if (len > 0) memcpy(full + header_len, data, len);
+
+    compute_hash(full, full_len, id_out);
+    if (object_exists(id_out)) {
+        free(full);
+        return 0;
+    }
+
+    char hex[HASH_HEX_SIZE + 1];
+    hash_to_hex(id_out, hex);
+
+    char dir_path[512];
+    snprintf(dir_path, sizeof(dir_path), "%s/%.2s", OBJECTS_DIR, hex);
+    if (mkdir(dir_path, 0755) != 0 && access(dir_path, F_OK) != 0) {
+        free(full);
+        return -1;
+    }
+
+    char final_path[512];
+    object_path(id_out, final_path, sizeof(final_path));
+    int fd = open(final_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) {
+        free(full);
+        return -1;
+    }
+
+    ssize_t total = 0;
+    while ((size_t)total < full_len) {
+        ssize_t w = write(fd, full + total, full_len - (size_t)total);
+        if (w <= 0) {
+            close(fd);
+            free(full);
+            return -1;
+        }
+        total += w;
+    }
+
+    if (fsync(fd) != 0) {
+        close(fd);
+        free(full);
+        return -1;
+    }
+
+    close(fd);
+    free(full);
+    return 0;
 }
 
 // Read an object from the store.
@@ -122,7 +180,88 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 // The caller is responsible for calling free(*data_out).
 // Returns 0 on success, -1 on error (file not found, corrupt, etc.).
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
-    // TODO: Implement
-    (void)id; (void)type_out; (void)data_out; (void)len_out;
-    return -1;
+    char path[512];
+    object_path(id, path, sizeof(path));
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return -1;
+    }
+
+    long file_size = ftell(f);
+    if (file_size < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return -1;
+    }
+
+    uint8_t *full = malloc((size_t)file_size);
+    if (!full) {
+        fclose(f);
+        return -1;
+    }
+
+    if (fread(full, 1, (size_t)file_size, f) != (size_t)file_size) {
+        free(full);
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+
+    ObjectID actual;
+    compute_hash(full, (size_t)file_size, &actual);
+    if (memcmp(actual.hash, id->hash, HASH_SIZE) != 0) {
+        free(full);
+        return -1;
+    }
+
+    uint8_t *nul = memchr(full, '\0', (size_t)file_size);
+    if (!nul) {
+        free(full);
+        return -1;
+    }
+
+    size_t header_len = (size_t)(nul - full);
+    char header[96];
+    if (header_len >= sizeof(header)) {
+        free(full);
+        return -1;
+    }
+    memcpy(header, full, header_len);
+    header[header_len] = '\0';
+
+    char type_str[16];
+    size_t payload_len;
+    if (sscanf(header, "%15s %zu", type_str, &payload_len) != 2) {
+        free(full);
+        return -1;
+    }
+
+    if (strcmp(type_str, "blob") == 0) *type_out = OBJ_BLOB;
+    else if (strcmp(type_str, "tree") == 0) *type_out = OBJ_TREE;
+    else if (strcmp(type_str, "commit") == 0) *type_out = OBJ_COMMIT;
+    else {
+        free(full);
+        return -1;
+    }
+
+    size_t data_offset = header_len + 1;
+    if ((size_t)file_size < data_offset || ((size_t)file_size - data_offset) != payload_len) {
+        free(full);
+        return -1;
+    }
+
+    void *out = malloc(payload_len ? payload_len : 1);
+    if (!out) {
+        free(full);
+        return -1;
+    }
+    if (payload_len > 0) memcpy(out, full + data_offset, payload_len);
+
+    free(full);
+    *data_out = out;
+    *len_out = payload_len;
+    return 0;
 }
